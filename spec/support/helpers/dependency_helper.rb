@@ -67,6 +67,10 @@ module DependencyHelper
     dependency_present? "sidekiq"
   end
 
+  def que_present?
+    dependency_present? "que"
+  end
+
   def dependency_present?(dependency_file)
     Gem.loaded_specs.key? dependency_file
   end

@@ -1,105 +1,107 @@
-require 'spec_helper'
+if DependencyHelper.que_present?
+  describe "Que integration" do
+    before(:context) do
+      require "que"
 
-describe "Que integration" do
-  let(:file) { File.expand_path('lib/appsignal/integrations/que.rb') }
-
-  context "with que" do
-    before do
-      module Que
-        class Job
-          def _run
-            run
-          end
-
-          def attrs
-            {
-              job_id: 123,
-              queue: 'dfl',
-              job_class: self.class.name,
-              priority: 100,
-              args: ['the floor'],
-              run_at: '1-1-1'
-            }
-          end
-        end
-      end
-
-      class SuccessJob < Que::Job
+      class MyQueJob < Que::Job
         def run
         end
       end
-
-      class FailureJob < Que::Job
-        def run
-          raise TestError.new('the roof')
-        end
-
-        class TestError < StandardError
-        end
-      end
-
-      load file
-      start_agent
     end
 
-    describe :around_perform_resque_plugin do
-      let(:transaction) { Appsignal::Transaction.new(1, {}) }
-      let(:job) { SuccessJob.new }
-      let(:invoked_job) { nil }
+    before do
+      start_agent
+      allow(Que).to receive(:execute)
+    end
+
+    let(:job_attrs) do
+      {
+        :job_id => 123,
+        :queue => "dfl",
+        :job_class => "MyQueJob",
+        :priority => 100,
+        :args => ["the floor"],
+        :run_at => fixed_time,
+        :error_count => 0
+      }
+    end
+
+    describe :around__run_que_plugin do
+      let(:env) do
+        {
+          :class => "MyQueJob",
+          :method => "run",
+          :metadata => {
+            :id => 123,
+            :queue => "dfl",
+            :priority => 100,
+            :run_at => fixed_time.to_s,
+            :attempts => 0
+          },
+          :params => ["the floor"]
+        }
+      end
+      let(:request) { Appsignal::Transaction::GenericRequest.new(env) }
+      let(:transaction) do
+        Appsignal::Transaction.new(
+          SecureRandom.uuid,
+          Appsignal::Transaction::BACKGROUND_JOB,
+          request
+        )
+      end
+      let(:job) { MyQueJob.new(job_attrs) }
+
       before do
-        transaction.stub(:complete! => true)
-        Appsignal::Transaction.stub(:current => transaction)
+        allow(transaction).to receive(:complete).and_return(true)
+        allow(Appsignal::Transaction).to receive(:current).and_return(transaction)
       end
 
       context "without exception" do
-        it "should create a new transaction" do
-          Appsignal::Transaction.should_receive(:create).and_return(transaction)
+        it "should create a GenericRequest with the correct params" do
+          expect(Appsignal::Transaction::GenericRequest).to receive(:new)
+            .with(env)
+            .and_return(request)
         end
 
-        it "should wrap in a transaction with the correct params" do
-          Appsignal.should_receive(:monitor_transaction).with(
-            'perform_job.que',
-            class:  'SuccessJob',
-            method: 'run',
-            metadata: {
-              id: 123,
-              queue: 'dfl',
-              priority: 100,
-              run_at: '1-1-1',
-              attempts: 0
-            },
-            params: ['the floor']
-          )
+        it "should create a new transaction" do
+          allow(Appsignal::Transaction::GenericRequest).to receive(:new).and_return(request)
+          expect(Appsignal::Transaction).to receive(:create)
+            .with(instance_of(String), Appsignal::Transaction::BACKGROUND_JOB, request)
+            .and_return(transaction)
+        end
+
+        it "should call Appsignal#instrument with the correct params" do
+          expect(Appsignal).to receive(:instrument).with("perform_job.que")
         end
 
         it "should close the transaction" do
-          transaction.should_receive(:complete!)
+          expect(transaction).to receive(:complete)
         end
 
         after { job._run }
       end
 
       context "with exception" do
-        let(:job) { FailureJob.new }
-        it "should set the exception" do
-          transaction.should_receive(:add_exception)
+        let(:job) { ::MyQueJob.new(job_attrs) }
+        let(:error) { ::StandardError.new("TestError") }
+
+        before do
+          allow(job).to receive(:run).and_raise(error)
+          allow(Appsignal::Transaction).to receive(:current).and_return(transaction)
+          expect(Appsignal::Transaction).to receive(:create)
+            .with(
+              kind_of(String),
+              Appsignal::Transaction::BACKGROUND_JOB,
+              kind_of(Appsignal::Transaction::GenericRequest)
+            ).and_return(transaction)
         end
 
-        after do
-          begin
-            job._run
-          rescue FailureJob::TestError
-            # Do nothing
-          end
+        it "should set the exception" do
+          expect(transaction).to receive(:set_error).with(error)
         end
+
+        after { job._run }
       end
     end
-  end
-
-  context "without que" do
-    before(:all) { Object.send(:remove_const, :Que) }
-
-    specify { expect { ::Que }.to raise_error(NameError) }
-    specify { expect { load file }.to_not raise_error }
   end
 end
